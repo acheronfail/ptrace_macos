@@ -6,6 +6,10 @@
 
 This repository is me attempting to understand how to properly use `ptrace` on macOS.
 
+## Usage
+
+Use the [`justfile`](./justfile)!
+
 ## Links
 
 * https://www.spaceflint.com/?p=150
