@@ -1,18 +1,14 @@
-#include <assert.h>
 #include <mach/mach.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/errno.h>
 #include <sys/ptrace.h>
-#include <sys/types.h>
-#include <sys/wait.h>
 #include <unistd.h>
 
 // To properly integrate with mach exceptions, we need to use code that's generated
-// with `mig`. We include the header file here, and also declare the `mac_exc_server` function
-// that's defined in `mig/mach_excServer.c` since we'll call it later.
-#include "mig/mach_exc.h"
+// with `mig`. It's compiled into the resuling binary and we also declare the
+// `mac_exc_server` function that's defined in `mach_excServer.c` since we use it.
 boolean_t mach_exc_server(mach_msg_header_t *InHeadP, mach_msg_header_t *OutHeadP);
 
 // This needs to be global, since it's defined in `main` after the fork, but we
@@ -95,23 +91,25 @@ int main(int argc, char *argv[]) {
   // it requires codesigning the binary with entitlements and a valid Apple Developer
   // identity or something. Either way, I couldn't figure it out, and have just set
   // this up to use root for the time being.
-  printf("[parent] getting target_task_port for pid: %d\n", child_pid);
-  mach_port_name_t target_task_port = 0;
-  CHECK_KERN(task_for_pid(mach_task_self(), child_pid, &target_task_port));
-  printf("[parent] target_task_port: %d\n", target_task_port);
+  printf("[parent] getting child_task for pid: %d\n", child_pid);
+  mach_port_name_t child_task = 0;
+  CHECK_KERN(task_for_pid(mach_task_self(), child_pid, &child_task));
+  printf("[parent] child_task: %d\n", child_task);
 
   // Next, we want to replace the target task's exception ports with one we own,
   // so we allocate a new one:
-  mach_port_name_t target_exception_port = 0;
-  CHECK_KERN(mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &target_exception_port));
-  printf("[parent] target_exception_port: %d\n", target_exception_port);
+  mach_port_name_t child_exc_port = 0;
+  CHECK_KERN(mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &child_exc_port));
+  printf("[parent] child_exc_port: %d\n", child_exc_port);
   CHECK_KERN(mach_port_insert_right(
-      mach_task_self(), target_exception_port, target_exception_port, MACH_MSG_TYPE_MAKE_SEND));
+      mach_task_self(), child_exc_port, child_exc_port, MACH_MSG_TYPE_MAKE_SEND));
 
   // Now we register our created exception port with the traced process.
-  exception_behavior_t b = EXCEPTION_DEFAULT | MACH_EXCEPTION_CODES;
-  CHECK_KERN(task_set_exception_ports(
-      target_task_port, EXC_MASK_ALL, target_exception_port, b, THREAD_STATE_NONE));
+  CHECK_KERN(task_set_exception_ports(child_task,
+                                      EXC_MASK_ALL,
+                                      child_exc_port,
+                                      EXCEPTION_DEFAULT | MACH_EXCEPTION_CODES,
+                                      THREAD_STATE_NONE));
 
   // Finally, after all this, we're ready to use ptrace to attach as a tracer.
   // There are a few extra restrictions on this that are relaxed since we're
@@ -130,13 +128,13 @@ int main(int argc, char *argv[]) {
                         MACH_RCV_MSG,             /* receive message */
                         0,                        /* size of send buffer */
                         sizeof(req),              /* size of receive buffer */
-                        target_exception_port,    /* port to receive on */
+                        child_exc_port,           /* port to receive on */
                         MACH_MSG_TIMEOUT_NONE,    /* wait indefinitely */
                         MACH_PORT_NULL));         /* notify port, unused */
 
     // we received an exception, so suspend all threads of the target process
     // FIXME: this sometimes returns `MACH_SEND_INVALID_DEST`? ignored for now
-    task_suspend(target_task_port);
+    task_suspend(child_task);
 
     if (!mach_exc_server((mach_msg_header_t *)req, (mach_msg_header_t *)rpl)) {
       CHECK_KERN(((mig_reply_error_t *)rpl)->RetCode);
@@ -145,7 +143,7 @@ int main(int argc, char *argv[]) {
 
     // we've parsed the exception and are ready to reply, resume the target process
     // FIXME: this sometimes returns `MACH_SEND_INVALID_DEST`? ignored for now
-    task_resume(target_task_port);
+    task_resume(child_task);
 
     // reply to the exception
     mach_msg_size_t send_sz = ((mach_msg_header_t *)rpl)->msgh_size;
@@ -159,7 +157,7 @@ int main(int argc, char *argv[]) {
   }
 
   // clean up
-  CHECK_KERN(mach_port_deallocate(mach_task_self(), target_task_port));
+  CHECK_KERN(mach_port_deallocate(mach_task_self(), child_task));
 
   return EXIT_SUCCESS;
 }
@@ -172,10 +170,10 @@ kern_return_t catch_mach_exception_raise(mach_port_t exception_port,
                                          exception_type_t exception_type,
                                          mach_exception_data_t codes,
                                          mach_msg_type_number_t num_codes) {
-  printf("[parent] catch_mach_exception_raise\n");
-  printf("[parent] -- exception_type: %x\n", exception_type);
+  printf("[parent] catch_mach_exception_raise:\n");
+  printf("[parent] - exception_type: %x\n", exception_type);
   for (int i = 0; i < num_codes; i++)
-    printf("[parent] -- codes[%d]: 0x%llx\n", i, codes[i]);
+    printf("[parent] - codes[%d]: 0x%llx\n", i, codes[i]);
 
   if (exception_type == EXC_SOFTWARE && codes[0] == EXC_SOFT_SIGNAL) {
     // clear SIGTRAP signals before sending through to traced process
@@ -183,10 +181,10 @@ kern_return_t catch_mach_exception_raise(mach_port_t exception_port,
       codes[1] = 0;
     }
 
-    printf("[parent] -- child_pid: %d\n", child_pid);
-    printf("[parent] -- task_port: %d\n", task_port);
-    printf("[parent] -- thread_port: %d\n", thread_port);
-    printf("[parent] -- exception_port: %d\n", exception_port);
+    printf("[parent] - child_pid: %d\n", child_pid);
+    printf("[parent] - task_port: %d\n", task_port);
+    printf("[parent] - thread_port: %d\n", thread_port);
+    printf("[parent] - exception_port: %d\n", exception_port);
 
     printf("[parent] ptrace(PT_THUPDATE, %d, %d, 0x%llx)\n", child_pid, thread_port, codes[1]);
     CHECK_ERRNO(ptrace(PT_THUPDATE, child_pid, (caddr_t)(uintptr_t)thread_port, codes[1]));
