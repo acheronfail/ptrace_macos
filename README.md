@@ -1,6 +1,6 @@
 # Explorations with `ptrace` on macOS
 
-`ptrace` on Linux is wonderful. It's simple, it's functional and it works.
+`ptrace` on Linux is wonderful. It's simple, it's functional and easy to use.
 
 `ptrace` on macOS isn't.
 

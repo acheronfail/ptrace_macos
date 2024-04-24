@@ -14,6 +14,6 @@ mig:
 
 run:
   just mig
-  gcc -o child child.c
-  gcc -sectcreate __TEXT __info_plist Info.plist -o main main.c mig/*.o
-  sudo ./main ./child
+  gcc -o tracee tracee.c
+  gcc -sectcreate __TEXT __info_plist Info.plist -o tracer tracer.c mig/*.o
+  sudo ./tracer ./tracee
