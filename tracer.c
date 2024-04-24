@@ -169,27 +169,11 @@ int main(int argc, char *argv[]) {
   CHECK_KERN(task_for_pid(mach_task_self(), child_pid, &target_task_port));
   printf("[parent] target_task_port: %d\n", target_task_port);
 
-  // Next, we fetch and save the exception ports registered in the target process
-  // before we replace them - it makes detaching later on easier.
-  exception_mask_t saved_masks[EXC_TYPES_COUNT];
-  mach_port_t saved_ports[EXC_TYPES_COUNT];
-  exception_behavior_t saved_behaviors[EXC_TYPES_COUNT];
-  thread_state_flavor_t saved_flavors[EXC_TYPES_COUNT];
-  mach_msg_type_number_t saved_exception_types_count;
-  CHECK_KERN(task_get_exception_ports(target_task_port,
-                                      EXC_MASK_ALL,
-                                      saved_masks,
-                                      &saved_exception_types_count,
-                                      saved_ports,
-                                      saved_behaviors,
-                                      saved_flavors));
-
-  // Now we've saved the process' original exception ports, it's time to replace
-  // them with new exception ports that we control.
+  // Next, we want to replace the target task's exception ports with one we own,
+  // so we allocate a new one:
   mach_port_name_t target_exception_port = 0;
   CHECK_KERN(mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &target_exception_port));
   printf("[parent] target_exception_port: %d\n", target_exception_port);
-
   CHECK_KERN(mach_port_insert_right(
       mach_task_self(), target_exception_port, target_exception_port, MACH_MSG_TYPE_MAKE_SEND));
 
