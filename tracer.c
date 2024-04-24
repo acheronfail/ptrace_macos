@@ -85,35 +85,36 @@ kern_return_t catch_mach_exception_raise_state_identity(mach_port_t exception_po
   return MACH_RCV_INVALID_TYPE;
 }
 
-void check_kern_error(kern_return_t value, char *message) {
-  if (value != KERN_SUCCESS) {
-    printf("failed at: %s with %s (%x) at %s:%d\n",
-           message,
-           mach_error_string(value),
-           value,
-           __FILE__,
-           __LINE__);
-    exit(EXIT_FAILURE);
-  }
-}
+// Some macros to make error handling less verbose when calling various apis
 
-void check_errno_error(int result, char *message) {
-  if (result != 0) {
-    printf("failed at: %s with %s (%d) at %s:%d\n",
-           message,
-           strerror(errno),
-           errno,
-           __FILE__,
-           __LINE__);
-    exit(EXIT_FAILURE);
-  }
-}
+#define EXIT_WITH_MESSAGE(message, description, code)                                              \
+  printf("failed at: %s with %s (%d) [%s:%d]\n", message, description, code, __FILE__, __LINE__);  \
+  exit(EXIT_FAILURE);
+
+#define CHECK_ERRNO(expression)                                                                    \
+  ({                                                                                               \
+    errno = 0;                                                                                     \
+    int value = (expression);                                                                      \
+    if (value != 0) {                                                                              \
+      EXIT_WITH_MESSAGE(#expression, strerror(errno), errno);                                      \
+    }                                                                                              \
+    value;                                                                                         \
+  })
+
+#define CHECK_KERN(expression)                                                                     \
+  ({                                                                                               \
+    kern_return_t value = (expression);                                                            \
+    if (value != KERN_SUCCESS) {                                                                   \
+      EXIT_WITH_MESSAGE(#expression, mach_error_string(value), value);                             \
+    }                                                                                              \
+    value;                                                                                         \
+  })
 
 int main(int argc, char *argv[]) {
   // first, we fork - the parent will be the tracer, the child the tracee
   child_pid = fork();
   if (child_pid == -1) {
-    check_errno_error(-1, "fork");
+    EXIT_WITH_MESSAGE("fork", strerror(errno), errno);
   }
 
   // CHILD PROCESS: the tracee
@@ -121,15 +122,11 @@ int main(int argc, char *argv[]) {
     // immediately SIGSTOP ourselves - we will wait for the parent to set itself
     // up as the tracer before it continues our execution
     printf("[child] raise: SIGSTOP\n");
-    int result = raise(SIGSTOP);
-    check_errno_error(result, "raise:SIGSTOP");
+    CHECK_ERRNO(raise(SIGSTOP));
 
     // now spawn a child process with the arguments passed on the command line
     printf("[child] execvp\n");
-    result = execvp(argv[1], &argv[1]);
-
-    // if `execvp` returns then it's failed, and its return value is always non-zero
-    check_errno_error(result, "execvp");
+    CHECK_ERRNO(execvp(argv[1], &argv[1]));
   }
 
   // PARENT PROCESS: the tracer
@@ -169,8 +166,7 @@ int main(int argc, char *argv[]) {
   // this up to use root for the time being.
   printf("[parent] getting target_task_port for pid: %d\n", child_pid);
   mach_port_name_t target_task_port = 0;
-  kern_return_t kern_r = task_for_pid(mach_task_self(), child_pid, &target_task_port);
-  check_kern_error(kern_r, "task_for_pid");
+  CHECK_KERN(task_for_pid(mach_task_self(), child_pid, &target_task_port));
   printf("[parent] target_task_port: %d\n", target_task_port);
 
   // Next, we fetch and save the exception ports registered in the target process
@@ -180,37 +176,32 @@ int main(int argc, char *argv[]) {
   exception_behavior_t saved_behaviors[EXC_TYPES_COUNT];
   thread_state_flavor_t saved_flavors[EXC_TYPES_COUNT];
   mach_msg_type_number_t saved_exception_types_count;
-  kern_r = task_get_exception_ports(target_task_port,
-                                    EXC_MASK_ALL,
-                                    saved_masks,
-                                    &saved_exception_types_count,
-                                    saved_ports,
-                                    saved_behaviors,
-                                    saved_flavors);
-  check_kern_error(kern_r, "task_get_exception_ports");
+  CHECK_KERN(task_get_exception_ports(target_task_port,
+                                      EXC_MASK_ALL,
+                                      saved_masks,
+                                      &saved_exception_types_count,
+                                      saved_ports,
+                                      saved_behaviors,
+                                      saved_flavors));
 
   // Now we've saved the process' original exception ports, it's time to replace
   // them with new exception ports that we control.
   mach_port_name_t target_exception_port = 0;
-  kern_r = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &target_exception_port);
-  check_kern_error(kern_r, "mach_port_allocate");
+  CHECK_KERN(mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &target_exception_port));
   printf("[parent] target_exception_port: %d\n", target_exception_port);
 
-  kern_r = mach_port_insert_right(
-      mach_task_self(), target_exception_port, target_exception_port, MACH_MSG_TYPE_MAKE_SEND);
-  check_kern_error(kern_r, "mach_port_insert_right");
+  CHECK_KERN(mach_port_insert_right(
+      mach_task_self(), target_exception_port, target_exception_port, MACH_MSG_TYPE_MAKE_SEND));
 
   // Now we register our created exception port with the traced process.
   exception_behavior_t b = EXCEPTION_DEFAULT | MACH_EXCEPTION_CODES;
-  kern_r = task_set_exception_ports(
-      target_task_port, EXC_MASK_ALL, target_exception_port, b, THREAD_STATE_NONE);
-  check_kern_error(kern_r, "task_set_exception_ports");
+  CHECK_KERN(task_set_exception_ports(
+      target_task_port, EXC_MASK_ALL, target_exception_port, b, THREAD_STATE_NONE));
 
   // Finally, after all this, we're ready to use ptrace to attach as a tracer.
   // There are a few extra restrictions on this that are relaxed since we're
   // running as root.
-  int result = ptrace(PT_ATTACHEXC, child_pid, 0, 0);
-  check_errno_error(result, "ptrace:PT_ATTACHEXC");
+  CHECK_ERRNO(ptrace(PT_ATTACHEXC, child_pid, 0, 0));
   printf("[parent] attached as tracer\n");
 
   // Now we're the tracer for the child, we can start a loop to handle mach
@@ -220,45 +211,40 @@ int main(int argc, char *argv[]) {
 
     // this will block until an exception is received
     printf("[parent] waiting for mach exception...\n");
-    kern_r = mach_msg((mach_msg_header_t *)req, /* receive buffer */
-                      MACH_RCV_MSG,             /* receive message */
-                      0,                        /* size of send buffer */
-                      sizeof(req),              /* size of receive buffer */
-                      target_exception_port,    /* port to receive on */
-                      MACH_MSG_TIMEOUT_NONE,    /* wait indefinitely */
-                      MACH_PORT_NULL);          /* notify port, unused */
-    check_kern_error(kern_r, "mach_msg:recv");
+    CHECK_KERN(mach_msg((mach_msg_header_t *)req, /* receive buffer */
+                        MACH_RCV_MSG,             /* receive message */
+                        0,                        /* size of send buffer */
+                        sizeof(req),              /* size of receive buffer */
+                        target_exception_port,    /* port to receive on */
+                        MACH_MSG_TIMEOUT_NONE,    /* wait indefinitely */
+                        MACH_PORT_NULL));         /* notify port, unused */
 
     // we received an exception, so suspend all threads of the target process
-    kern_r = task_suspend(target_task_port);
     // FIXME: this sometimes returns `MACH_SEND_INVALID_DEST`? ignored for now
-    // check_kern_error(kern_r, "task_suspend");
+    task_suspend(target_task_port);
 
     if (!mach_exc_server((mach_msg_header_t *)req, (mach_msg_header_t *)rpl)) {
-      check_kern_error(((mig_reply_error_t *)rpl)->RetCode, "mach_exc_server");
+      CHECK_KERN(((mig_reply_error_t *)rpl)->RetCode);
       exit(EXIT_FAILURE);
     }
 
     // we've parsed the exception and are ready to reply, resume the target process
-    kern_r = task_resume(target_task_port);
     // FIXME: this sometimes returns `MACH_SEND_INVALID_DEST`? ignored for now
-    // check_kern_error(kern_r, "task_resume");
+    task_resume(target_task_port);
 
     // reply to the exception
     mach_msg_size_t send_sz = ((mach_msg_header_t *)rpl)->msgh_size;
-    kern_r = mach_msg((mach_msg_header_t *)rpl, /* send buffer */
-                      MACH_SEND_MSG,            /* send message */
-                      send_sz,                  /* size of send buffer */
-                      0,                        /* size of receive buffer */
-                      MACH_PORT_NULL,           /* port to receive on */
-                      MACH_MSG_TIMEOUT_NONE,    /* wait indefinitely */
-                      MACH_PORT_NULL);
-    check_kern_error(kern_r, "mach_msg:send");
+    CHECK_KERN(mach_msg((mach_msg_header_t *)rpl, /* send buffer */
+                        MACH_SEND_MSG,            /* send message */
+                        send_sz,                  /* size of send buffer */
+                        0,                        /* size of receive buffer */
+                        MACH_PORT_NULL,           /* port to receive on */
+                        MACH_MSG_TIMEOUT_NONE,    /* wait indefinitely */
+                        MACH_PORT_NULL));
   }
 
   // clean up
-  kern_r = mach_port_deallocate(mach_task_self(), target_task_port);
-  check_kern_error(kern_r, "mach_port_deallocate");
+  CHECK_KERN(mach_port_deallocate(mach_task_self(), target_task_port));
 
   return EXIT_SUCCESS;
 }
