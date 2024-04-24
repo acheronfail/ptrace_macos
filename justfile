@@ -4,16 +4,12 @@ _default:
   just -l
 
 mig:
-  #!/usr/bin/env bash
   rm -rf mig
   mkdir -p mig
-  cd mig
+  cd mig && mig -arch arm64 {{macos_sdk}}/usr/include/mach/mach_exc.defs
+  cd mig && gcc -c *.c
 
-  mig -arch arm64 {{macos_sdk}}/usr/include/mach/mach_exc.defs
-  gcc -c *.c
-
-run:
-  just mig
+run: mig
   gcc -o tracee tracee.c
   gcc -sectcreate __TEXT __info_plist Info.plist -o tracer tracer.c mig/*.o
-  sudo ./tracer ./tracee
+  sudo ./tracer ./tracee 1
